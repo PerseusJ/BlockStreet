@@ -20,8 +20,8 @@
     "semantic_hash": "588304d481af8236689674c6091b1925"
   },
   "src/main/java/com/perseusj/blockstreet/BlockStreet.java": {
-    "mtime": 1781376794.7951903,
-    "ast_hash": "1896fef7259dfddc5c91f28aa2aac174",
+    "mtime": 1781378963.5144875,
+    "ast_hash": "6dcf55c58daf2a983aecb392d2588aed",
     "semantic_hash": ""
   },
   "src/main/java/com/perseusj/blockstreet/commands/BlockStreetCommand.java": {

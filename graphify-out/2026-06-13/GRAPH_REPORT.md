@@ -1,7 +1,7 @@
 # Graph Report - BlockStreet  (2026-06-13)
 
 ## Corpus Check
-- 62 files · ~34,202 words
+- 62 files · ~34,200 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary

@@ -269,11 +269,6 @@
     "ast_hash": "0eb5f2d0f152a123b695cb202f539eb2",
     "semantic_hash": ""
   },
-  "implementation_plan.md": {
-    "mtime": 1781374806.813892,
-    "ast_hash": "c1bee27761343832f72a0de0ea7091a8",
-    "semantic_hash": ""
-  },
   "src/main/java/com/perseusj/blockstreet/commands/subcommands/LedgerCommand.java": {
     "mtime": 1781375403.526471,
     "ast_hash": "b2b1e0daeeb993591137f7c16459dcb4",
