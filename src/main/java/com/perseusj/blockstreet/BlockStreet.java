@@ -6,14 +6,23 @@ import com.perseusj.blockstreet.config.ConfigManager;
 import com.perseusj.blockstreet.db.DatabaseService;
 import com.perseusj.blockstreet.db.DbWriteQueue;
 import com.perseusj.blockstreet.db.UpsertOrderTask;
+import com.perseusj.blockstreet.db.MailboxLedgerService;
+import com.perseusj.blockstreet.db.PlayerCacheDao;
+import com.perseusj.blockstreet.engine.ExpirationScheduler;
 import com.perseusj.blockstreet.engine.MatchingEngine;
 import com.perseusj.blockstreet.engine.OrderSubmissionService;
 import com.perseusj.blockstreet.engine.SettlementDispatcher;
 import com.perseusj.blockstreet.engine.model.Order;
+import com.perseusj.blockstreet.gui.GuiTab;
+import com.perseusj.blockstreet.gui.tabs.BrowseTab;
+import com.perseusj.blockstreet.gui.tabs.BuyOrderTab;
+import com.perseusj.blockstreet.gui.tabs.MailboxTab;
+import com.perseusj.blockstreet.gui.tabs.MyOrdersTab;
+import com.perseusj.blockstreet.gui.tabs.SellTab;
 import com.perseusj.blockstreet.gui.GuiManager;
+import com.perseusj.blockstreet.gui.ChatInputManager;
 import com.perseusj.blockstreet.listeners.GuiListener;
 import com.perseusj.blockstreet.listeners.PlayerListener;
-import com.perseusj.blockstreet.managers.MailboxManager;
 import com.perseusj.blockstreet.managers.VaultEconomyService;
 import com.perseusj.blockstreet.utils.ItemFactory;
 import net.milkbowl.vault.economy.Economy;
@@ -53,10 +62,14 @@ public class BlockStreet extends JavaPlugin {
     private VaultEconomyService  vaultEconomy;
     private DatabaseService      databaseService;
     private DbWriteQueue         dbWriteQueue;
+    private MailboxLedgerService mailboxLedgerService;
+    private PlayerCacheDao       playerCacheDao;
+    private ExpirationScheduler  expirationScheduler;
     private MatchingEngine       matchingEngine;
     private SettlementDispatcher settlementDispatcher;
     private OrderSubmissionService orderSubmissionService;
     private GuiManager           guiManager;
+    private ChatInputManager     chatInputManager;
 
     // ──────────────────────────── Static accessor ─────────────────────────────────
 
@@ -85,27 +98,13 @@ public class BlockStreet extends JavaPlugin {
         }
         vaultEconomy = new VaultEconomyService(economy, getLogger());
 
-        // ── 3. Mailbox ─────────────────────────────────────────────────────────
-        MailboxManager.init(getLogger());
-
-        // ── 4. ItemFactory registry ────────────────────────────────────────────
-        ItemFactory.clearRegistry();
-        for (AssetConfig asset : configManager.getAllAssets().values()) {
-            ItemFactory.register(asset.getSymbol(), asset.getMaterial());
-        }
-        getLogger().info("[BlockStreet] Registered " + configManager.getAllAssets().size()
-                + " asset(s) in ItemFactory.");
-
-        // ── 5. Settlement Dispatcher ────────────────────────────────────────────
-        settlementDispatcher = new SettlementDispatcher(this, vaultEconomy, configManager);
-
-        // ── 6. Database ─────────────────────────────────────────────────
+        // ── 3. Database & Queues ─────────────────────────────────────────────────
         databaseService = new DatabaseService(getDataFolder(), getLogger());
         databaseService.init();
         try {
             databaseService.initSchema();
         } catch (SQLException e) {
-            getLogger().severe("[BlockStreet] Failed to initialize database schema: " + e.getMessage());
+            getLogger().log(java.util.logging.Level.SEVERE, "[BlockStreet] Failed to initialize database schema: {0}", e.getMessage());
             getLogger().severe("[BlockStreet] Disabling plugin to prevent data corruption.");
             getServer().getPluginManager().disablePlugin(this);
             return;
@@ -114,9 +113,22 @@ public class BlockStreet extends JavaPlugin {
         dbWriteQueue = new DbWriteQueue(databaseService, getLogger());
         dbWriteQueue.start();
 
+        // ── 4. Mailbox Ledger & Player Cache ───────────────────────────────────
+        mailboxLedgerService = new MailboxLedgerService(this, databaseService, economy, dbWriteQueue, getLogger());
+        playerCacheDao = new PlayerCacheDao(databaseService, getLogger());
+
+        // ── 5. ItemFactory registry ────────────────────────────────────────────
+        ItemFactory.clearRegistry();
+        for (AssetConfig asset : configManager.getAllAssets().values()) {
+            ItemFactory.register(asset.getSymbol(), asset.getMaterial());
+        }
+        getLogger().log(java.util.logging.Level.INFO, "[BlockStreet] Registered {0} asset(s) in ItemFactory.", configManager.getAllAssets().size());
+
+        // ── 6. Settlement Dispatcher ────────────────────────────────────────────
+        settlementDispatcher = new SettlementDispatcher(this, mailboxLedgerService, configManager);
+
         // ── 7. Matching Engine ─────────────────────────────────────────────────
         matchingEngine = new MatchingEngine(getLogger(), settlementDispatcher::dispatch);
-        matchingEngine.setTakerFeeRate(configManager.getTakerFeeRate());
         matchingEngine.setDbWriteQueue(dbWriteQueue);
         matchingEngine.start();
 
@@ -131,19 +143,31 @@ public class BlockStreet extends JavaPlugin {
             }
         });
 
-        // ── 9. Order Submission Service ───────────────────────────────────────────────────
+        // ── 9. Order Submission Service ─────────────────────────────────────────
         orderSubmissionService = new OrderSubmissionService(
-                matchingEngine, vaultEconomy, configManager, getLogger());
+                matchingEngine, vaultEconomy, configManager, mailboxLedgerService, getLogger());
 
-        // ── 10. GUI Manager ────────────────────────────────────────────────────────────
+        // ── 10. Expiration Scheduler ────────────────────────────────────────────
+        long sweepTicks = configManager.getExpirationSweepTicks();
+        expirationScheduler = new ExpirationScheduler(this, databaseService, configManager, matchingEngine, mailboxLedgerService, getLogger());
+        expirationScheduler.runTaskTimer(this, sweepTicks, sweepTicks);
+
+        // ── 12. GUI Manager ────────────────────────────────────────────────────────────
         guiManager = new GuiManager(this, matchingEngine, orderSubmissionService, configManager);
+        guiManager.registerTabHandler(GuiTab.BROWSE, new BrowseTab(configManager, matchingEngine));
+        guiManager.registerTabHandler(GuiTab.SELL, new SellTab(configManager, guiManager));
+        guiManager.registerTabHandler(GuiTab.BUY_ORDER, new BuyOrderTab(configManager, guiManager));
+        guiManager.registerTabHandler(GuiTab.MY_ORDERS, new MyOrdersTab(matchingEngine, orderSubmissionService, configManager));
+        guiManager.registerTabHandler(GuiTab.MAILBOX, new MailboxTab(mailboxLedgerService, this));
         guiManager.start();
 
-        // ── 11. Event Listeners ──────────────────────────────────────────────────────────
+        // ── 12. Event Listeners ─────────────────────────────────────────────────
         getServer().getPluginManager().registerEvents(new PlayerListener(this), this);
         getServer().getPluginManager().registerEvents(new GuiListener(guiManager, this), this);
+        chatInputManager = new ChatInputManager(this);
+        getServer().getPluginManager().registerEvents(chatInputManager, this);
 
-        // ── 12. Command Executor ─────────────────────────────────────────────────────────
+        // ── 13. Command Executor ────────────────────────────────────────────────
         BlockStreetCommand commandHandler = new BlockStreetCommand(this);
         PluginCommand bsCommand = getCommand("blockstreet");
         if (bsCommand != null) {
@@ -158,9 +182,12 @@ public class BlockStreet extends JavaPlugin {
 
     @Override
     public void onDisable() {
-        // 1. Stop GUI refresh loop before engine (no point refreshing after engine stops)
+        // 1. Stop GUI refresh loop and Expiration Scheduler
         if (guiManager != null) {
             guiManager.stop();
+        }
+        if (expirationScheduler != null) {
+            expirationScheduler.cancel();
         }
 
         // 2. Stop matching engine gracefully (poison-pill + 5s join)
@@ -233,6 +260,15 @@ public class BlockStreet extends JavaPlugin {
     /** Returns the database service (Phase 4). */
     public DatabaseService getDatabaseService()          { return databaseService; }
 
+    /** Returns the Mailbox Ledger Service. */
+    public MailboxLedgerService getMailboxLedgerService() { return mailboxLedgerService; }
+
+    /** Returns the Player Cache DAO. */
+    public PlayerCacheDao getPlayerCacheDao() { return playerCacheDao; }
+
     /** Returns the async DB write queue (Phase 4). */
-    public DbWriteQueue getDbWriteQueue()                { return dbWriteQueue; }
+    public DbWriteQueue getDbWriteQueue() { return dbWriteQueue; }
+
+    /** Returns the Chat Input Manager. */
+    public ChatInputManager getChatInputManager() { return chatInputManager; }
 }

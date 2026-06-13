@@ -37,20 +37,35 @@ public final class ConfigManager {
     /** Map of symbol → AssetConfig. Replaced atomically on each reload. */
     private volatile Map<String, AssetConfig> tradableAssets = Collections.emptyMap();
 
-    /** Taker fee rate as a decimal fraction (e.g. 0.01 for 1%). */
-    private volatile double takerFeeRate = 0.01;
-
     /** How many ticks between GUI re-renders (default 10 = 0.5 s). */
     private volatile int guiRefreshTicks = 10;
 
     /** DB write flush interval in seconds. */
     private volatile int dbWriteIntervalSeconds = 3;
 
-    /** Maximum resting order age in hours before auto-cancellation. */
-    private volatile int orderExpiryHours = 72;
+    /** Setup fee rate as a decimal fraction (e.g. 0.025 for 2.5%). */
+    private volatile double setupFeeRate = 0.025;
+
+    /** Standard sales tax rate (e.g. 0.08 for 8%). */
+    private volatile double standardTaxRate = 0.08;
+
+    /** Premium sales tax rate (e.g. 0.04 for 4%). */
+    private volatile double premiumTaxRate = 0.04;
+
+    /** Permission node required for premium tax rate. */
+    private volatile String premiumPermissionNode = "blockstreet.premium";
+
+    /** Default duration for new orders in days. */
+    private volatile int defaultDurationDays = 30;
+
+    /** List of allowed durations in days for the GUI. */
+    private volatile java.util.List<Integer> allowedDurations = java.util.Arrays.asList(3, 7, 30);
+
+    /** Expiration sweep interval in Bukkit ticks (20 ticks = 1 second). */
+    private volatile long expirationSweepTicks = 5 * 60 * 20L; // 5 minutes
 
     /** Maximum simultaneous open orders a single player may hold. */
-    private volatile int maxOpenOrdersPerPlayer = 10;
+    private volatile int maxOpenOrdersPerPlayer = 50;
 
     /** Number of depth levels shown in the GUI. */
     private volatile int marketDepthLevels = 5;
@@ -76,11 +91,22 @@ public final class ConfigManager {
         FileConfiguration cfg = plugin.getConfig();
 
         // ── Engine settings ────────────────────────────────────────────────────
-        takerFeeRate             = cfg.getDouble("engine.taker-fee-percentage", 1.0) / 100.0;
         guiRefreshTicks          = cfg.getInt("engine.gui-refresh-ticks", 10);
         dbWriteIntervalSeconds   = cfg.getInt("engine.db-write-interval-seconds", 3);
-        orderExpiryHours         = cfg.getInt("engine.order-expiry-hours", 72);
-        maxOpenOrdersPerPlayer   = cfg.getInt("engine.max-open-orders-per-player", 10);
+
+        // ── Market settings ────────────────────────────────────────────────────
+        setupFeeRate             = cfg.getDouble("market.setup-fee-rate", 0.025);
+        standardTaxRate          = cfg.getDouble("market.standard-sales-tax", 0.08);
+        premiumTaxRate           = cfg.getDouble("market.premium-sales-tax", 0.04);
+        premiumPermissionNode    = cfg.getString("market.premium-permission", "blockstreet.premium");
+        defaultDurationDays      = cfg.getInt("market.default-duration-days", 30);
+        allowedDurations         = cfg.getIntegerList("market.allowed-durations");
+        if (allowedDurations == null || allowedDurations.isEmpty()) {
+            allowedDurations = java.util.Arrays.asList(3, 7, 30);
+        }
+        long sweepMinutes        = cfg.getLong("market.expiration-sweep-minutes", 5L);
+        expirationSweepTicks     = sweepMinutes * 60L * 20L;
+        maxOpenOrdersPerPlayer   = cfg.getInt("market.max-open-orders-per-player", 50);
 
         // ── GUI settings ───────────────────────────────────────────────────────
         marketDepthLevels = cfg.getInt("gui.market-depth-levels", 5);
@@ -102,8 +128,8 @@ public final class ConfigManager {
         }
 
         tradableAssets = Collections.unmodifiableMap(newAssets);
-        logger.info(String.format("[ConfigManager] Loaded %d tradeable asset(s). TakerFeeRate=%.2f%%",
-                tradableAssets.size(), takerFeeRate * 100));
+        logger.info(String.format("[ConfigManager] Loaded %d tradeable asset(s). SetupFeeRate=%.1f%%, Tax=%.1f%% (Prem: %.1f%%)",
+                tradableAssets.size(), setupFeeRate * 100, standardTaxRate * 100, premiumTaxRate * 100));
     }
 
     /**
@@ -180,17 +206,19 @@ public final class ConfigManager {
 
     // ──────────────────────────── Scalar getters (volatile reads) ───────────────
 
-    /** Taker fee rate as a decimal fraction (e.g. {@code 0.01} for 1%). */
-    public double getTakerFeeRate()          { return takerFeeRate; }
+    public double getSetupFeeRate()          { return setupFeeRate; }
+    public double getStandardTaxRate()       { return standardTaxRate; }
+    public double getPremiumTaxRate()        { return premiumTaxRate; }
+    public String getPremiumPermissionNode() { return premiumPermissionNode; }
+    public int getDefaultDurationDays()      { return defaultDurationDays; }
+    public java.util.List<Integer> getAllowedDurations() { return allowedDurations; }
+    public long getExpirationSweepTicks()    { return expirationSweepTicks; }
 
     /** GUI re-render interval in Bukkit ticks (default 10). */
     public int getGuiRefreshTicks()          { return guiRefreshTicks; }
 
     /** DB write flush interval in seconds (default 3). */
     public int getDbWriteIntervalSeconds()   { return dbWriteIntervalSeconds; }
-
-    /** Maximum resting order age in hours before auto-cancellation. */
-    public int getOrderExpiryHours()         { return orderExpiryHours; }
 
     /** Maximum simultaneous open orders per player. */
     public int getMaxOpenOrdersPerPlayer()   { return maxOpenOrdersPerPlayer; }

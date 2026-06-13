@@ -69,6 +69,31 @@ public final class Order {
     /** Current lifecycle status. Written only on the engine thread. */
     private volatile OrderStatus status;
 
+    // ──────────────────────────── Albion Market Fields ─────────────────────────
+
+    /** Non-refundable setup fee paid at order placement. */
+    private volatile double setupFeePaid = 0.0;
+
+    /** Duration the player chose in days (e.g., 7 or 30). */
+    private volatile int durationDays = 30;
+
+    /** Epoch-millisecond timestamp when this order expires. 0 = no expiration (engine internal). */
+    private volatile long expiresAt = 0L;
+
+    /**
+     * Whether the seller held Premium status at the moment the order was listed.
+     * Captured on the Main Thread in {@link com.perseusj.blockstreet.engine.OrderSubmissionService} 
+     * (player is guaranteed online then) and persisted in {@code resting_orders.seller_premium}.
+     *
+     * <p><strong>Why we store this on the Order and not check it at settlement time:</strong>
+     * {@link com.perseusj.blockstreet.engine.SettlementDispatcher#settleMaker} runs after the fill, which may happen while
+     * the seller is offline. {@code Bukkit.getPlayer(uuid)} returns {@code null} for offline
+     * players, so any online-only permission check would silently fall back to the standard
+     * (higher) tax rate, costing the seller money. Storing the flag at listing time is the
+     * only safe solution.
+     */
+    private volatile boolean sellerPremium = false;
+
     // ──────────────────────────── Escrow tracking ────────────────────────────────
 
     /**
@@ -168,6 +193,18 @@ public final class Order {
     public OrderStatus getStatus()     { return status; }
     public double getEscrowAmount()    { return escrowAmount; }
     public double getEscrowAmountConsumedSoFar() { return escrowAmountConsumedSoFar; }
+
+    public double getSetupFeePaid()    { return setupFeePaid; }
+    public void setSetupFeePaid(double setupFeePaid) { this.setupFeePaid = setupFeePaid; }
+
+    public int getDurationDays()       { return durationDays; }
+    public void setDurationDays(int durationDays) { this.durationDays = durationDays; }
+
+    public long getExpiresAt()         { return expiresAt; }
+    public void setExpiresAt(long expiresAt) { this.expiresAt = expiresAt; }
+
+    public boolean isSellerPremium()   { return sellerPremium; }
+    public void setSellerPremium(boolean sellerPremium) { this.sellerPremium = sellerPremium; }
 
     // ──────────────────────────── Mutation (engine-thread only unless noted) ────
 

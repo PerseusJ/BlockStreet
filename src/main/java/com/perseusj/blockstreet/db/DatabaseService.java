@@ -69,6 +69,9 @@ public final class DatabaseService {
     private static final String DDL_IDX_RESTING_SYMBOL_STATUS =
             "CREATE INDEX IF NOT EXISTS idx_resting_symbol_status ON resting_orders(symbol, status)";
 
+    private static final String DDL_IDX_RESTING_EXPIRY =
+            "CREATE INDEX IF NOT EXISTS idx_resting_expiry ON resting_orders(status, expires_at)";
+
     private static final String DDL_TRADE_HISTORY = """
             CREATE TABLE IF NOT EXISTS trade_history (
                 trade_id        TEXT PRIMARY KEY,
@@ -90,18 +93,11 @@ public final class DatabaseService {
     private static final String DDL_IDX_TRADE_PLAYER =
             "CREATE INDEX IF NOT EXISTS idx_trade_player ON trade_history(maker_player_id, taker_player_id)";
 
-    private static final String DDL_MAILBOX_ITEMS = """
-            CREATE TABLE IF NOT EXISTS mailbox_items (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                player_id   TEXT NOT NULL,
-                symbol      TEXT NOT NULL,
-                quantity    INTEGER NOT NULL,
-                stored_at   INTEGER NOT NULL,
-                delivered   INTEGER NOT NULL DEFAULT 0
+    private static final String DDL_SCHEMA_VERSION = """
+            CREATE TABLE IF NOT EXISTS schema_version (
+                version  INTEGER PRIMARY KEY,
+                applied_at INTEGER NOT NULL
             )""";
-
-    private static final String DDL_IDX_MAILBOX_PLAYER =
-            "CREATE INDEX IF NOT EXISTS idx_mailbox_player ON mailbox_items(player_id, delivered)";
 
     // ──────────────────────────── WAL + cache pragmas ────────────────────────────
 
@@ -113,10 +109,21 @@ public final class DatabaseService {
 
     private static final String SELECT_OPEN_ORDERS = """
             SELECT order_id, player_id, symbol, side, order_type,
-                   limit_price, qty_original, qty_remaining, status, submitted_at
+                   limit_price, qty_original, qty_remaining, status, submitted_at,
+                   setup_fee_paid, duration_days, expires_at, seller_premium
             FROM resting_orders
             WHERE status IN ('OPEN', 'PARTIALLY_FILLED')
             ORDER BY submitted_at ASC
+            """;
+
+    private static final String SELECT_EXPIRED_ORDERS = """
+            SELECT order_id, player_id, symbol, side, order_type,
+                   limit_price, qty_original, qty_remaining, status, submitted_at,
+                   setup_fee_paid, duration_days, expires_at, seller_premium
+            FROM resting_orders
+            WHERE status IN ('OPEN', 'PARTIALLY_FILLED')
+              AND expires_at > 0
+              AND expires_at <= ?
             """;
 
     // ──────────────────────────── Fields ─────────────────────────────────────────
@@ -199,18 +206,81 @@ public final class DatabaseService {
             stmt.execute(PRAGMA_CACHE);
 
             // Create tables
+            stmt.execute(DDL_SCHEMA_VERSION);
             stmt.execute(DDL_RESTING_ORDERS);
             stmt.execute(DDL_TRADE_HISTORY);
-            stmt.execute(DDL_MAILBOX_ITEMS);
-
+            stmt.execute("DROP TABLE IF EXISTS mailbox_items");
+            
             // Create indexes
             stmt.execute(DDL_IDX_RESTING_PLAYER);
             stmt.execute(DDL_IDX_RESTING_SYMBOL_STATUS);
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_resting_expiry ON resting_orders(status, expires_at)");
             stmt.execute(DDL_IDX_TRADE_SYMBOL);
             stmt.execute(DDL_IDX_TRADE_PLAYER);
-            stmt.execute(DDL_IDX_MAILBOX_PLAYER);
         }
+        
+        // Run V2 schema migrations
+        try (Connection conn = getConnection()) {
+            migrateSchemaV2(conn);
+        }
+
         logger.info("[BlockStreet] Database schema initialized.");
+    }
+
+    private void migrateSchemaV2(Connection conn) throws SQLException {
+        try (Statement stmt = conn.createStatement()) {
+            // Check current schema version
+            stmt.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)");
+            ResultSet rs = stmt.executeQuery("SELECT MAX(version) FROM schema_version");
+            int version = 0;
+            if (rs.next()) {
+                version = rs.getInt(1);
+            }
+            rs.close();
+
+            if (version < 2) {
+                logger.info("[BlockStreet] Migrating database to Schema V2...");
+                
+                try {
+                    stmt.execute("ALTER TABLE resting_orders ADD COLUMN setup_fee_paid REAL NOT NULL DEFAULT 0.0");
+                    stmt.execute("ALTER TABLE resting_orders ADD COLUMN duration_days INTEGER NOT NULL DEFAULT 30");
+                    stmt.execute("ALTER TABLE resting_orders ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0");
+                    stmt.execute("ALTER TABLE resting_orders ADD COLUMN seller_premium INTEGER NOT NULL DEFAULT 0");
+                } catch (SQLException e) {
+                    // Ignore if columns already exist (in case of partial migration/rerun)
+                }
+
+                // Drop old mailbox table and create new ledger
+                stmt.execute("DROP TABLE IF EXISTS mailbox_items");
+                stmt.execute("""
+                    CREATE TABLE IF NOT EXISTS mailbox_ledger (
+                        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                        player_id    TEXT    NOT NULL,
+                        entry_type   TEXT    NOT NULL,
+                        amount       REAL    NOT NULL DEFAULT 0.0,
+                        item_nbt     TEXT,
+                        item_qty     INTEGER NOT NULL DEFAULT 0,
+                        source       TEXT    NOT NULL,
+                        order_id     TEXT,
+                        claimed      INTEGER NOT NULL DEFAULT 0,
+                        stored_at    INTEGER NOT NULL
+                    )""");
+                stmt.execute("CREATE INDEX IF NOT EXISTS idx_ledger_player ON mailbox_ledger(player_id, claimed)");
+
+                // Create player_cache table
+                stmt.execute("""
+                    CREATE TABLE IF NOT EXISTS player_cache (
+                        player_id               TEXT PRIMARY KEY,
+                        player_name             TEXT NOT NULL,
+                        last_seen               INTEGER NOT NULL,
+                        resource_pack_accepted  INTEGER NOT NULL DEFAULT 0
+                    )""");
+
+                // Update version
+                stmt.execute("INSERT INTO schema_version (version, applied_at) VALUES (2, " + System.currentTimeMillis() + ")");
+                logger.info("[BlockStreet] Schema V2 migration complete.");
+            }
+        }
     }
 
     // ──────────────────────────── Connection access ───────────────────────────────
@@ -311,6 +381,11 @@ public final class DatabaseService {
                 submittedAt
         );
 
+        order.setSetupFeePaid(rs.getDouble("setup_fee_paid"));
+        order.setDurationDays(rs.getInt("duration_days"));
+        order.setExpiresAt(rs.getLong("expires_at"));
+        order.setSellerPremium(rs.getInt("seller_premium") == 1);
+
         // Restore partial fill state
         if (qtyRemaining < qtyOriginal) {
             int alreadyFilled = qtyOriginal - qtyRemaining;
@@ -321,65 +396,29 @@ public final class DatabaseService {
         return order;
     }
 
-    // ──────────────────────────── Mailbox delivery queries ───────────────────────
-
-    /**
-     * Returns all undelivered mailbox items for the given player.
-     * Used by {@code PlayerJoinEvent} handler to deliver pending items.
-     *
-     * @param playerId the player's UUID
-     * @return list of pending mailbox entries as [symbol, quantity, id] rows
-     */
-    public List<MailboxEntry> loadUndeliveredMailbox(UUID playerId) {
-        List<MailboxEntry> entries = new ArrayList<>();
-        String sql = "SELECT id, symbol, quantity FROM mailbox_items " +
-                "WHERE player_id = ? AND delivered = 0 ORDER BY stored_at ASC";
-
+    public List<Order> loadExpiredOrders(long nowMs, ConfigManager configManager) {
+        List<Order> orders = new ArrayList<>();
         try (Connection conn = getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, playerId.toString());
+             PreparedStatement ps = conn.prepareStatement(SELECT_EXPIRED_ORDERS)) {
+            ps.setLong(1, nowMs);
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
-                    entries.add(new MailboxEntry(
-                            rs.getLong("id"),
-                            rs.getString("symbol"),
-                            rs.getInt("quantity")
-                    ));
+                    try {
+                        Order order = mapRowToOrder(rs, configManager);
+                        if (order != null) {
+                            orders.add(order);
+                        }
+                    } catch (Exception e) {
+                        logger.warning("[BlockStreet] Failed to load expired order "
+                                + rs.getString("order_id") + ": " + e.getMessage());
+                    }
                 }
             }
         } catch (SQLException e) {
-            logger.severe("[BlockStreet] Failed to load mailbox for player "
-                    + playerId + ": " + e.getMessage());
+            logger.severe("[BlockStreet] Failed to load expired orders: " + e.getMessage());
         }
-        return entries;
+        return orders;
     }
 
-    /**
-     * Marks a single mailbox entry as delivered (by row ID).
-     * Called after items are successfully added to the player's inventory.
-     *
-     * @param rowId the {@code mailbox_items.id} primary key
-     */
-    public void markMailboxDelivered(long rowId) {
-        String sql = "UPDATE mailbox_items SET delivered = 1 WHERE id = ?";
-        try (Connection conn = getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setLong(1, rowId);
-            ps.executeUpdate();
-        } catch (SQLException e) {
-            logger.warning("[BlockStreet] Failed to mark mailbox entry " + rowId
-                    + " as delivered: " + e.getMessage());
-        }
-    }
 
-    // ──────────────────────────── Nested value type ───────────────────────────────
-
-    /**
-     * Lightweight value object for a mailbox row returned by {@link #loadUndeliveredMailbox}.
-     *
-     * @param rowId    primary key of the {@code mailbox_items} row
-     * @param symbol   asset symbol
-     * @param quantity number of items to deliver
-     */
-    public record MailboxEntry(long rowId, String symbol, int quantity) {}
 }

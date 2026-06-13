@@ -13,5 +13,7 @@ public enum OrderStatus {
     /** Explicitly cancelled by the player or by the engine (e.g., market order timeout). */
     CANCELLED,
     /** Rejected before entering the book (insufficient funds/items, invalid parameters). */
-    REJECTED
+    REJECTED,
+    /** Order reached its duration limit; assets dispatched to Mailbox. */
+    EXPIRED
 }

@@ -50,6 +50,7 @@ public final class BlockStreetCommand implements CommandExecutor, TabCompleter {
         register(new CancelCommand(plugin));
         register(new OrdersCommand(plugin));
         register(new HistoryCommand(plugin));
+        register(new LedgerCommand(plugin));
         register(new PriceCommand(plugin));
         register(new AdminCommand(plugin));
     }

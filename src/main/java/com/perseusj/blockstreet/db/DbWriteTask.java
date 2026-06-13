@@ -19,8 +19,7 @@ import java.sql.SQLException;
  *   <li>{@link InsertMailboxTask} — records offline item deliveries in {@code mailbox_items}</li>
  * </ul>
  */
-public sealed interface DbWriteTask
-        permits InsertTradeTask, UpsertOrderTask, InsertMailboxTask {
+public interface DbWriteTask {
 
     /**
      * Executes the SQL operation(s) for this task using the provided connection.

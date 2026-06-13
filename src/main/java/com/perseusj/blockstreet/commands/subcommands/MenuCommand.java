@@ -52,7 +52,12 @@ public final class MenuCommand implements SubCommand {
             }
             if (assets.size() == 1) {
                 String symbol = assets.keySet().iterator().next();
-                plugin.getGuiManager().openMarketGui(player, symbol);
+                plugin.getGuiManager().openGui(player);
+                var session = plugin.getGuiManager().getSession(player.getUniqueId());
+                if (session != null) {
+                    session.setBrowseCategory(symbol);
+                    plugin.getGuiManager().renderSession(session);
+                }
                 return true;
             }
             // Multiple assets — list them
@@ -66,7 +71,12 @@ public final class MenuCommand implements SubCommand {
         }
 
         String symbol = args[0].toUpperCase();
-        plugin.getGuiManager().openMarketGui(player, symbol);
+        plugin.getGuiManager().openGui(player);
+        var session = plugin.getGuiManager().getSession(player.getUniqueId());
+        if (session != null) {
+            session.setBrowseCategory(symbol);
+            plugin.getGuiManager().renderSession(session);
+        }
         return true;
     }
 

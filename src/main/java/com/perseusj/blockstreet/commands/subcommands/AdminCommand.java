@@ -82,16 +82,14 @@ public final class AdminCommand implements SubCommand {
 
     private boolean handleReload(CommandSender sender) {
         plugin.getConfigManager().load();
-        // Propagate updated taker fee rate to the engine
-        plugin.getMatchingEngine().setTakerFeeRate(plugin.getConfigManager().getTakerFeeRate());
+        // Propagate updated settings if needed (taker fee was removed)
         // Refresh ItemFactory registry in case assets changed
         ItemFactory.clearRegistry();
         for (AssetConfig asset : plugin.getConfigManager().getAllAssets().values()) {
             ItemFactory.register(asset.getSymbol(), asset.getMaterial());
         }
         sender.sendMessage("§a[BlockStreet] §fConfiguration reloaded successfully.");
-        sender.sendMessage(String.format("  §7Taker fee: §e%.2f%%  §7Assets: §e%d",
-                plugin.getConfigManager().getTakerFeeRate() * 100,
+        sender.sendMessage(String.format("  §7Assets: §e%d",
                 plugin.getConfigManager().getAllAssets().size()));
         plugin.getLogger().info("[BlockStreet] Config reloaded by " + sender.getName());
         return true;

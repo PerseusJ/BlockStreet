@@ -2,6 +2,7 @@ package com.perseusj.blockstreet.engine;
 
 import com.perseusj.blockstreet.config.AssetConfig;
 import com.perseusj.blockstreet.config.ConfigManager;
+import com.perseusj.blockstreet.db.MailboxLedgerService;
 import com.perseusj.blockstreet.engine.book.MarketDepthSnapshot;
 import com.perseusj.blockstreet.engine.model.Order;
 import com.perseusj.blockstreet.engine.model.OrderSide;
@@ -42,10 +43,11 @@ import java.util.logging.Logger;
  */
 public final class OrderSubmissionService {
 
-    private final MatchingEngine     engine;
-    private final VaultEconomyService economy;
-    private final ConfigManager      config;
-    private final Logger             logger;
+    private final MatchingEngine       engine;
+    private final VaultEconomyService  economy;
+    private final ConfigManager        config;
+    private final MailboxLedgerService mailboxLedger;
+    private final Logger               logger;
 
     /**
      * Per-player guard preventing concurrent Phase 2A operations.
@@ -68,11 +70,13 @@ public final class OrderSubmissionService {
     public OrderSubmissionService(MatchingEngine engine,
                                   VaultEconomyService economy,
                                   ConfigManager config,
+                                  MailboxLedgerService mailboxLedger,
                                   Logger logger) {
-        this.engine  = engine;
-        this.economy = economy;
-        this.config  = config;
-        this.logger  = logger;
+        this.engine        = engine;
+        this.economy       = economy;
+        this.config        = config;
+        this.mailboxLedger = mailboxLedger;
+        this.logger        = logger;
     }
 
     // ──────────────────────────── Public submission API ──────────────────────────
@@ -185,6 +189,9 @@ public final class OrderSubmissionService {
                 System.nanoTime()
         );
 
+        long durationMs = java.util.concurrent.TimeUnit.DAYS.toMillis(order.getDurationDays());
+        order.setExpiresAt(System.currentTimeMillis() + durationMs);
+
 
         // ── 6. Phase 2A asset lock ──────────────────────────────────────────────
         // Register in pending map BEFORE locking so PlayerQuitEvent can detect the window (E19)
@@ -257,6 +264,21 @@ public final class OrderSubmissionService {
 
         // Remove items immediately — they are now escrowed by the plugin
         player.getInventory().removeItem(toRemove);
+
+        double setupFee = order.getLimitPrice() * qty * config.getSetupFeeRate();
+        if (setupFee > 0) {
+            if (!economy.has(player.getUniqueId(), setupFee)) {
+                player.sendMessage("§c[BlockStreet] Insufficient funds for setup fee: " + economy.format(setupFee));
+                order.setStatus(OrderStatus.REJECTED);
+                // Return items
+                player.getInventory().addItem(toRemove);
+                return false;
+            }
+            economy.withdrawPlayer(player.getUniqueId(), setupFee);
+        }
+        order.setSetupFeePaid(setupFee);
+        order.setSellerPremium(player.hasPermission(config.getPremiumPermissionNode()));
+
         order.tryLockAssets();
         logger.fine("[OrderSubmissionService] SELL lock: removed " + qty + "× " +
                 assetConfig.getSymbol() + " from " + player.getName());
@@ -266,16 +288,18 @@ public final class OrderSubmissionService {
     /** Phase 2A — LIMIT BUY order: withdraw exact escrow from Vault. */
     private boolean lockLimitBuyAssets(Player player, Order order, int qty) {
         double escrowAmount = order.getLimitPrice() * qty;
+        double setupFee   = escrowAmount * config.getSetupFeeRate();
+        double totalLock  = escrowAmount + setupFee;
 
-        if (!economy.has(player.getUniqueId(), escrowAmount)) {
+        if (!economy.has(player.getUniqueId(), totalLock)) {
             player.sendMessage(String.format(
                     "§c[BlockStreet] Insufficient funds. You need %s to place this order.",
-                    economy.format(escrowAmount)));
+                    economy.format(totalLock)));
             order.setStatus(OrderStatus.REJECTED);
             return false;
         }
 
-        boolean withdrew = economy.withdrawPlayer(player.getUniqueId(), escrowAmount);
+        boolean withdrew = economy.withdrawPlayer(player.getUniqueId(), totalLock);
         if (!withdrew) {
             player.sendMessage("§c[BlockStreet] Failed to reserve funds. Please try again.");
             order.setStatus(OrderStatus.REJECTED);
@@ -283,9 +307,10 @@ public final class OrderSubmissionService {
         }
 
         order.setEscrowAmount(escrowAmount);
+        order.setSetupFeePaid(setupFee);
         order.tryLockAssets();
-        logger.fine(String.format("[OrderSubmissionService] LIMIT BUY lock: escrowed %s for %s",
-                economy.format(escrowAmount), player.getName()));
+        logger.fine(String.format("[OrderSubmissionService] LIMIT BUY lock: escrowed %s (inc. setup fee) for %s",
+                economy.format(totalLock), player.getName()));
         return true;
     }
 
@@ -369,10 +394,12 @@ public final class OrderSubmissionService {
 
         if (order.getSide() == OrderSide.SELL) {
             // Return items via mailbox (player is offline)
-            com.perseusj.blockstreet.managers.MailboxManager.getInstance()
-                    .storeItems(order.getPlayerId(),
-                            java.util.List.of(ItemFactory.create(order.getSymbol(),
-                                    order.getQuantityRemaining())));
+            mailboxLedger.addItemEntry(
+                    order.getPlayerId(),
+                    ItemFactory.create(order.getSymbol(), order.getQuantityRemaining()),
+                    "ROLLBACK",
+                    order.getOrderId()
+            );
         } else {
             // Refund escrow
             double refund = order.getEscrowAmount();

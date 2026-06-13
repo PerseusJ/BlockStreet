@@ -67,7 +67,12 @@ public final class OrdersCommand implements SubCommand {
             return true;
         }
 
-        plugin.getGuiManager().openActiveOrdersGui(player, symbol);
+        plugin.getGuiManager().openGui(player);
+        var session = plugin.getGuiManager().getSession(player.getUniqueId());
+        if (session != null) {
+            session.setActiveTab(com.perseusj.blockstreet.gui.GuiTab.MY_ORDERS);
+            plugin.getGuiManager().renderSession(session);
+        }
         return true;
     }
 

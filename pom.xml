@@ -18,10 +18,10 @@
     </properties>
 
     <repositories>
-        <!-- Spigot API -->
+        <!-- PaperMC repo -->
         <repository>
-            <id>spigot-repo</id>
-            <url>https://hub.spigotmc.org/nexus/content/repositories/snapshots/</url>
+            <id>papermc</id>
+            <url>https://repo.papermc.io/repository/maven-public/</url>
         </repository>
         <!-- Vault API -->
         <repository>
@@ -31,11 +31,25 @@
     </repositories>
 
     <dependencies>
-        <!-- Spigot API — provided by server at runtime -->
+        <!-- Paper API (includes Kyori Adventure) — provided by server at runtime -->
         <dependency>
-            <groupId>org.spigotmc</groupId>
-            <artifactId>spigot-api</artifactId>
+            <groupId>io.papermc.paper</groupId>
+            <artifactId>paper-api</artifactId>
             <version>1.21.1-R0.1-SNAPSHOT</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- Explicit Kyori Adventure and BungeeChat APIs to fix VSCode/Eclipse JDT "Cannot access Audience" bug -->
+        <dependency>
+            <groupId>net.kyori</groupId>
+            <artifactId>adventure-api</artifactId>
+            <version>4.17.0</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>net.md-5</groupId>
+            <artifactId>bungeecord-chat</artifactId>
+            <version>1.20-R0.2-deprecated+build.18</version>
             <scope>provided</scope>
         </dependency>
 
@@ -110,11 +124,6 @@
                                     <pattern>com.zaxxer.hikari</pattern>
                                     <shadedPattern>com.perseusj.blockstreet.libs.hikari</shadedPattern>
                                 </relocation>
-                                <!-- Relocate SQLite driver -->
-                                <relocation>
-                                    <pattern>org.sqlite</pattern>
-                                    <shadedPattern>com.perseusj.blockstreet.libs.sqlite</shadedPattern>
-                                </relocation>
                             </relocations>
                             <filters>
                                 <!-- Strip signatures and licenses from all artifacts -->
@@ -132,30 +141,33 @@
                                     </excludes>
                                 </filter>
 
-                                <!-- SQLite-JDBC: keep ONLY Linux x86_64 native binary.
-                                     All other platforms (Windows, Mac, Android, Musl, FreeBSD,
-                                     arm variants) are stripped — Spigot servers run Linux x86_64. -->
+                                <!-- SQLite-JDBC: keep only natives relevant to Minecraft server platforms.
+                                     Covers: Linux x86_64/aarch64 (all major hosts), Linux-Musl x86_64/aarch64
+                                     (Pterodactyl/Alpine Docker), Windows x86_64 (home/LAN servers).
+                                     Strips: Android, FreeBSD, Mac, legacy arm/armv6/armv7/x86/ppc64,
+                                     Windows arm — none of these run Minecraft servers in practice. -->
                                 <filter>
                                     <artifact>org.xerial:sqlite-jdbc</artifact>
                                     <excludes>
-                                        <!-- Android variants -->
+                                        <!-- Android — not a server platform -->
                                         <exclude>org/sqlite/native/Linux-Android/**</exclude>
-                                        <!-- Musl libc variants -->
-                                        <exclude>org/sqlite/native/Linux-Musl/**</exclude>
-                                        <!-- FreeBSD -->
+                                        <!-- FreeBSD — not used for Minecraft hosting -->
                                         <exclude>org/sqlite/native/FreeBSD/**</exclude>
-                                        <!-- Linux non-x86_64 -->
-                                        <exclude>org/sqlite/native/Linux/aarch64/**</exclude>
+                                        <!-- macOS — dev only, not production Minecraft servers -->
+                                        <exclude>org/sqlite/native/Mac/**</exclude>
+                                        <!-- Linux legacy / rare arches -->
                                         <exclude>org/sqlite/native/Linux/arm/**</exclude>
                                         <exclude>org/sqlite/native/Linux/armv6/**</exclude>
                                         <exclude>org/sqlite/native/Linux/armv7/**</exclude>
                                         <exclude>org/sqlite/native/Linux/x86/**</exclude>
                                         <exclude>org/sqlite/native/Linux/ppc64/**</exclude>
-                                        <!-- Windows — all arch -->
-                                        <exclude>org/sqlite/native/Windows/**</exclude>
-                                        <!-- macOS — all arch -->
-                                        <exclude>org/sqlite/native/Mac/**</exclude>
-                                        <!-- Dragonfly, NetBSD, OpenBSD if present -->
+                                        <!-- Linux-Musl x86 (32-bit) — rare -->
+                                        <exclude>org/sqlite/native/Linux-Musl/x86/**</exclude>
+                                        <!-- Windows arm — not a Minecraft server platform -->
+                                        <exclude>org/sqlite/native/Windows/aarch64/**</exclude>
+                                        <exclude>org/sqlite/native/Windows/armv7/**</exclude>
+                                        <exclude>org/sqlite/native/Windows/x86/**</exclude>
+                                        <!-- Dragonfly, NetBSD, OpenBSD -->
                                         <exclude>org/sqlite/native/DragonFly/**</exclude>
                                         <exclude>org/sqlite/native/NetBSD/**</exclude>
                                         <exclude>org/sqlite/native/OpenBSD/**</exclude>
@@ -200,10 +212,11 @@
                                         <exclude>LICENSE</exclude>
                                     </excludes>
                                 </filter>
-                                <!-- Strip root-level google/ protobuf stubs not caught above -->
+                                <!-- Strip google/ protobuf from any artifact that contributes it -->
                                 <filter>
                                     <artifact>*:*</artifact>
                                     <excludes>
+                                        <exclude>com/google/**</exclude>
                                         <exclude>google/**</exclude>
                                     </excludes>
                                 </filter>

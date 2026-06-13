@@ -76,9 +76,6 @@ public final class MatchingEngine {
      */
     private volatile DbWriteQueue dbWriteQueue = null;
 
-    /** Fee rate snapshot — refreshed from config on reload. */
-    private volatile double takerFeeRate = 0.01; // default 1%
-
     /** Engine thread lifecycle flags. */
     private volatile boolean running = false;
     private Thread engineThread;
@@ -143,16 +140,6 @@ public final class MatchingEngine {
     }
 
     /**
-     * Updates the taker fee rate. Safe to call from any thread (volatile write).
-     * Called by ConfigManager on {@code /bs admin reload}.
-     *
-     * @param rate fee rate as a decimal fraction (e.g., 0.01 for 1%)
-     */
-    public void setTakerFeeRate(double rate) {
-        this.takerFeeRate = rate;
-    }
-
-    /**
      * Injects the async database write queue. Must be called before the engine processes
      * any orders if persistence is desired. Safe to call from any thread (volatile write).
      *
@@ -197,8 +184,8 @@ public final class MatchingEngine {
         // Obtain (or lazily create) the book for this symbol
         OrderBook book = books.computeIfAbsent(order.getSymbol(), OrderBook::new);
 
-        // Check for cancellation: a CANCELLED status signals a player-requested cancel
-        if (order.getStatus() == OrderStatus.CANCELLED) {
+        // Check for cancellation or expiration
+        if (order.getStatus() == OrderStatus.CANCELLED || order.getStatus() == OrderStatus.EXPIRED) {
             handleCancellation(order, book);
             book.rebuildDepthSnapshot();
             return;
@@ -364,7 +351,7 @@ public final class MatchingEngine {
                 taker,
                 executionPrice,
                 fillQty,
-                takerFeeRate,
+                0.0, // taker fee logic removed; handled in SettlementDispatcher
                 System.currentTimeMillis()
         );
         tradeMatchCallback.accept(trade);
@@ -435,10 +422,10 @@ public final class MatchingEngine {
 
         boolean removed = book.removeOrder(cancelOrder);
         if (removed) {
-            logger.fine("[MatchingEngine] Order " + cancelOrder.getOrderId() + " cancelled and removed from book.");
+            logger.fine("[MatchingEngine] Order " + cancelOrder.getOrderId() + " (" + cancelOrder.getStatus() + ") removed from book.");
         } else {
-            logger.warning("[MatchingEngine] Cancellation: order " + cancelOrder.getOrderId()
-                    + " not found in book (may have been filled just before cancel).");
+            logger.warning("[MatchingEngine] Cancellation/Expiration: order " + cancelOrder.getOrderId()
+                    + " not found in book (may have been filled just before).");
         }
 
         // Dispatch a cancellation event so SettlementDispatcher can issue the refund
@@ -479,6 +466,32 @@ public final class MatchingEngine {
      */
     public Map<String, OrderBook> getAllBooks() {
         return Collections.unmodifiableMap(books);
+    }
+
+    /**
+     * Returns the best (highest) resting bid price for the given symbol, or {@code 0.0}
+     * if there are no buy orders in the book.
+     *
+     * <p>Safe to call from any thread — reads the concurrent skip-list snapshot.
+     */
+    public double getBestBid(String symbol) {
+        OrderBook book = books.get(symbol);
+        if (book == null) return 0.0;
+        Map.Entry<Double, PriceLevel> entry = book.getBids().firstEntry();
+        return entry != null ? entry.getKey() : 0.0;
+    }
+
+    /**
+     * Returns the best (lowest) resting ask price for the given symbol, or {@code 0.0}
+     * if there are no sell orders in the book.
+     *
+     * <p>Safe to call from any thread — reads the concurrent skip-list snapshot.
+     */
+    public double getBestAsk(String symbol) {
+        OrderBook book = books.get(symbol);
+        if (book == null) return 0.0;
+        Map.Entry<Double, PriceLevel> entry = book.getAsks().firstEntry();
+        return entry != null ? entry.getKey() : 0.0;
     }
 
     /** Returns {@code true} if the engine thread is currently running. */

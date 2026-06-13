@@ -1,29 +1,24 @@
 package com.perseusj.blockstreet.listeners;
 
 import com.perseusj.blockstreet.BlockStreet;
-import com.perseusj.blockstreet.gui.ChatInputCatcher;
-import com.perseusj.blockstreet.managers.MailboxManager;
+import org.bukkit.Bukkit;
+import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.player.PlayerResourcePackStatusEvent;
+import org.bukkit.event.player.PlayerInteractEvent;
+import com.perseusj.blockstreet.items.MarketLedgerItem;
 
 import java.util.UUID;
 
 /**
  * Handles player lifecycle events relevant to BlockStreet.
  *
- * <h2>Mailbox Delivery (PlayerJoin — E1, E2)</h2>
- * When a player joins, any pending mailbox items (stored because the player was offline
- * during a fill, or their inventory was full) are delivered via
- * {@link MailboxManager#deliverPendingItems}.
- *
  * <h2>Chat-Catcher Cleanup (PlayerQuit — E19)</h2>
- * If a player disconnects while a {@link ChatInputCatcher} is active (waiting for price/qty
- * input via chat), the catcher is removed to prevent orphan listeners. Because Phase 2A
- * asset locking does not occur until {@code completeChatInput} is called at the end of the
- * chat flow, no asset rollback is needed at this stage — the player's funds/items are safe.
+ * If a player disconnects, the GUI manager cleans up active inputs and GUI sessions.
  *
  * <p>The {@link com.perseusj.blockstreet.gui.GuiManager#handlePlayerQuit} call also
  * clears the open GUI session, pending side, and active-orders cache — ensuring no
@@ -41,8 +36,49 @@ public class PlayerListener implements Listener {
 
     @EventHandler(priority = EventPriority.NORMAL)
     public void onPlayerJoin(PlayerJoinEvent event) {
-        // Deliver any items that were queued while the player was offline or inventory-full
-        MailboxManager.getInstance().deliverPendingItems(event.getPlayer());
+        Player player = event.getPlayer();
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            if (plugin.getPlayerCacheDao() != null) {
+                plugin.getPlayerCacheDao().updatePlayerCache(player.getUniqueId(), player.getName());
+            }
+        });
+
+        // Prompt for resource pack (optional polish for Phase 3)
+        // A real implementation might read a URL from config
+        // player.setResourcePack("https://example.com/blockstreet-pack.zip");
+    }
+
+    // ──────────────────────────── PlayerInteractEvent ──────────────────────────
+
+    @EventHandler
+    public void onInteract(PlayerInteractEvent event) {
+        if (event.getItem() == null) return;
+        if (!MarketLedgerItem.isMarketLedger(event.getItem())) return;
+        event.setCancelled(true);   // suppress default book-open behaviour
+        // Open the book programmatically so the player sees the clickable pages
+        event.getPlayer().openBook(event.getItem());
+    }
+
+    // ──────────────────────────── Resource Pack Event ──────────────────────────
+
+    @EventHandler
+    public void onResourcePackStatus(PlayerResourcePackStatusEvent event) {
+        boolean accepted = event.getStatus() == PlayerResourcePackStatusEvent.Status.SUCCESSFULLY_LOADED
+                || event.getStatus() == PlayerResourcePackStatusEvent.Status.ACCEPTED;
+        
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            if (plugin.getPlayerCacheDao() != null) {
+                plugin.getPlayerCacheDao().updateResourcePackStatus(event.getPlayer().getUniqueId(), accepted);
+            }
+        });
+        
+        var guiManager = plugin.getGuiManager();
+        if (guiManager != null) {
+            var session = guiManager.getSession(event.getPlayer().getUniqueId());
+            if (session != null) {
+                session.setResourcePackAccepted(accepted);
+            }
+        }
     }
 
     // ──────────────────────────── PlayerQuitEvent ────────────────────────────────
@@ -51,8 +87,6 @@ public class PlayerListener implements Listener {
      * Cleans up all BlockStreet state for a disconnecting player.
      *
      * <ol>
-     *   <li>If a {@link ChatInputCatcher} was active for this player, remove it so it
-     *       cannot fire after the player has left (prevents orphan listener).</li>
      *   <li>Clean up the open GUI session and supplementary maps via
      *       {@link com.perseusj.blockstreet.gui.GuiManager#handlePlayerQuit}.</li>
      * </ol>
@@ -68,13 +102,6 @@ public class PlayerListener implements Listener {
 
         var guiManager = plugin.getGuiManager();
         if (guiManager != null) {
-            // Remove any pending chat catcher (no asset lock to roll back — see javadoc above)
-            ChatInputCatcher catcher = guiManager.removeChatCatcher(playerId);
-            if (catcher != null) {
-                plugin.getLogger().fine("[BlockStreet] Removed dangling ChatInputCatcher for "
-                        + event.getPlayer().getName() + " on disconnect.");
-            }
-
             // Clean up GUI session, pending side, active-orders cache
             guiManager.handlePlayerQuit(playerId);
         }

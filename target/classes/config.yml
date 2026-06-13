@@ -14,10 +14,16 @@ database:
 engine:
   db-write-interval-seconds: 3
   gui-refresh-ticks: 10          # how often the market GUI re-renders (ticks)
-  order-expiry-hours: 72         # resting orders auto-cancelled after N hours
-  max-open-orders-per-player: 10
-  taker-fee-percentage: 1.0      # % of gross trade value destroyed as economy sink
-                                  # Makers always pay 0%. Range: 0.0–100.0. Recommended: 0.5–2.0.
+
+market:
+  setup-fee-rate: 0.025          # 2.5% — charged on all resting order placements
+  standard-sales-tax: 0.08       # 8% — charged on seller at execution
+  premium-sales-tax: 0.04        # 4% — halved for premium players
+  premium-permission: "blockstreet.premium"
+  default-duration-days: 30
+  allowed-durations: [3, 7, 30]  # Options shown in GUI
+  expiration-sweep-minutes: 5
+  max-open-orders-per-player: 50
 
 gui:
   market-depth-levels: 5         # top N bid/ask levels shown in GUI

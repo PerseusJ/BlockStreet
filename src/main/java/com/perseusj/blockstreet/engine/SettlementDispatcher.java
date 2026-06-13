@@ -1,11 +1,11 @@
 package com.perseusj.blockstreet.engine;
 
 import com.perseusj.blockstreet.config.ConfigManager;
+import com.perseusj.blockstreet.db.MailboxLedgerService;
 import com.perseusj.blockstreet.engine.model.Order;
 import com.perseusj.blockstreet.engine.model.OrderSide;
+import com.perseusj.blockstreet.engine.model.OrderStatus;
 import com.perseusj.blockstreet.engine.model.TradeMatch;
-import com.perseusj.blockstreet.managers.MailboxManager;
-import com.perseusj.blockstreet.managers.VaultEconomyService;
 import com.perseusj.blockstreet.utils.ItemFactory;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
@@ -47,19 +47,19 @@ import java.util.logging.Logger;
  */
 public final class SettlementDispatcher {
 
-    private final Plugin             plugin;
-    private final VaultEconomyService economy;
-    private final ConfigManager      config;
-    private final Logger             logger;
+    private final Plugin               plugin;
+    private final MailboxLedgerService mailboxLedger;
+    private final ConfigManager        config;
+    private final Logger               logger;
 
     // ──────────────────────────── Constructor ────────────────────────────────────
 
-    public SettlementDispatcher(Plugin plugin, VaultEconomyService economy,
+    public SettlementDispatcher(Plugin plugin, MailboxLedgerService mailboxLedger,
                                 ConfigManager config) {
-        this.plugin  = plugin;
-        this.economy = economy;
-        this.config  = config;
-        this.logger  = plugin.getLogger();
+        this.plugin        = plugin;
+        this.mailboxLedger = mailboxLedger;
+        this.config        = config;
+        this.logger        = plugin.getLogger();
     }
 
     // ──────────────────────────── Public dispatch (any thread) ───────────────────
@@ -94,12 +94,10 @@ public final class SettlementDispatcher {
 
         // ── Log the fee sink for admin transparency ───────────────────────────────
         double grossValue = trade.executionPrice() * trade.quantityFilled();
-        double feeAmount  = grossValue * trade.takerFeeRate();
         logger.fine(String.format(
-                "[SettlementDispatcher] Trade %s | Symbol=%s | Qty=%d | ExecPrice=%.4f" +
-                        " | TakerFee=%.4f (%.2f%%)",
+                "[SettlementDispatcher] Trade %s | Symbol=%s | Qty=%d | ExecPrice=%.4f",
                 trade.tradeId(), trade.symbol(), trade.quantityFilled(),
-                trade.executionPrice(), feeAmount, trade.takerFeeRate() * 100));
+                trade.executionPrice()));
     }
 
     // ──────────────────────────── Maker settlement ───────────────────────────────
@@ -117,18 +115,20 @@ public final class SettlementDispatcher {
         double grossValue = trade.executionPrice() * trade.quantityFilled();
 
         if (maker.getSide() == OrderSide.SELL) {
-            // Maker SOLD items (they were locked at Phase 2A) → receive full gross currency
-            economy.depositPlayer(maker.getPlayerId(), grossValue);
+            // Maker SOLD items → apply sales tax and route net to mailbox
+            double salesTaxRate = maker.isSellerPremium() ? config.getPremiumTaxRate() : config.getStandardTaxRate();
+            double tax          = grossValue * salesTaxRate;
+            double netValue     = grossValue - tax;
+            mailboxLedger.addCurrencyEntry(maker.getPlayerId(), netValue, "FILL", maker.getOrderId());
 
         } else {
-            // Maker BOUGHT → deliver items
-            deliverItems(maker.getPlayerId(), trade.symbol(), trade.quantityFilled(), "maker fill");
+            // Maker BOUGHT → deliver items to mailbox
+            mailboxLedger.addItemEntry(maker.getPlayerId(), ItemFactory.create(trade.symbol(), trade.quantityFilled()), "FILL", maker.getOrderId());
 
             // Refund any overpayment: maker locked limitPrice × qty at Phase 2A
-            // If executed below the limit price, the difference is refunded
             double overpay = (maker.getLimitPrice() - trade.executionPrice()) * trade.quantityFilled();
             if (overpay > 0.001) { // float epsilon guard
-                economy.depositPlayer(maker.getPlayerId(), overpay);
+                mailboxLedger.addCurrencyEntry(maker.getPlayerId(), overpay, "FILL", maker.getOrderId());
             }
         }
 
@@ -153,32 +153,27 @@ public final class SettlementDispatcher {
     private void settleTaker(TradeMatch trade) {
         Order  taker      = trade.takerOrder();
         double grossValue = trade.executionPrice() * trade.quantityFilled();
-        double feeRate    = trade.takerFeeRate();
-        double feeAmount  = grossValue * feeRate;   // destroyed — not deposited anywhere
-        double netValue   = grossValue - feeAmount;
 
         if (taker.getSide() == OrderSide.SELL) {
-            // Taker SOLD → deposit net proceeds (fee withheld and destroyed)
-            economy.depositPlayer(taker.getPlayerId(), netValue);
-            // Items were already removed from inventory during Phase 2A — no action needed here
+            // Taker SOLD → apply sales tax and route net to mailbox
+            double salesTaxRate = taker.isSellerPremium() ? config.getPremiumTaxRate() : config.getStandardTaxRate();
+            double tax          = grossValue * salesTaxRate;
+            double netValue     = grossValue - tax;
+            mailboxLedger.addCurrencyEntry(taker.getPlayerId(), netValue, "FILL", taker.getOrderId());
 
         } else {
-            // Taker BOUGHT → deliver items
-            deliverItems(taker.getPlayerId(), trade.symbol(), trade.quantityFilled(), "taker fill");
+            // Taker BOUGHT → deliver items to mailbox
+            mailboxLedger.addItemEntry(taker.getPlayerId(), ItemFactory.create(trade.symbol(), trade.quantityFilled()), "FILL", taker.getOrderId());
 
-            // Escrow refund logic:
-            // The taker locked escrowAmount upfront (Phase 2A).
-            // Each fill costs: executionPrice × fillQty  (the fee is the cost of being the taker).
-            // We track consumed escrow to compute cumulative refunds across partial fills.
-            double escrowUsed = grossValue; // fee is simply NOT refunded — it vanishes
+            // The taker locked escrowAmount upfront. Fee is not calculated here anymore,
+            // escrow unused is simply refunded.
+            double escrowUsed = grossValue;
             taker.incrementEscrowConsumed(escrowUsed);
 
-            // Calculate remaining refund only when the order is terminal (fully filled / market done)
-            // For partial fills on a resting LIMIT order, we defer the refund until it's fully consumed
             if (taker.getQuantityRemaining() == 0) {
                 double refund = taker.getEscrowAmount() - taker.getEscrowAmountConsumedSoFar();
                 if (refund > 0.001) {
-                    economy.depositPlayer(taker.getPlayerId(), refund);
+                    mailboxLedger.addCurrencyEntry(taker.getPlayerId(), refund, "FILL", taker.getOrderId());
                 }
                 taker.tryConsume();
             }
@@ -201,66 +196,17 @@ public final class SettlementDispatcher {
      */
     private void handleCancellationRefund(Order order) {
         int qtyRemaining = order.getQuantityRemaining();
+        String source = order.getStatus() == OrderStatus.EXPIRED ? "EXPIRATION" : "CANCEL";
 
         if (order.getSide() == OrderSide.SELL) {
-            // Return locked items
-            deliverItems(order.getPlayerId(), order.getSymbol(), qtyRemaining, "cancellation refund");
-
+            // Return locked items to mailbox
+            mailboxLedger.addItemEntry(order.getPlayerId(), ItemFactory.create(order.getSymbol(), qtyRemaining), source, order.getOrderId());
         } else {
             // BUY cancellation: refund remaining escrow
-            // Escrow for filled portions has already been consumed; refund only what's left
             double refundAmt = order.getLimitPrice() * qtyRemaining;
             if (refundAmt > 0.001) {
-                boolean ok = economy.depositPlayer(order.getPlayerId(), refundAmt);
-                if (ok) {
-                    logger.fine(String.format(
-                            "[SettlementDispatcher] BUY cancel refund: player=%s refund=%.4f symbol=%s qty=%d",
-                            order.getPlayerId(), refundAmt, order.getSymbol(), qtyRemaining));
-                }
+                mailboxLedger.addCurrencyEntry(order.getPlayerId(), refundAmt, source, order.getOrderId());
             }
-        }
-
-        // Notify player if online
-        Player player = Bukkit.getPlayer(order.getPlayerId());
-        if (player != null && player.isOnline()) {
-            player.sendMessage("§e[BlockStreet] §fOrder " +
-                    order.getOrderId().toString().substring(0, 8) + "… cancelled. Refund processed.");
-        }
-    }
-
-    // ──────────────────────────── Item delivery helper ────────────────────────────
-
-    /**
-     * Delivers {@code qty} units of {@code symbol} to the player.
-     * If the player is offline or their inventory is full, items go to the
-     * {@link MailboxManager}.
-     *
-     * <p><strong>Main Thread only.</strong>
-     *
-     * @param playerId  recipient player UUID
-     * @param symbol    asset symbol (e.g. "DIAMOND")
-     * @param qty       number of items to deliver
-     * @param context   short description for log messages (e.g. "maker fill")
-     */
-    private void deliverItems(UUID playerId, String symbol, int qty, String context) {
-        ItemStack items = ItemFactory.create(symbol, qty);
-        Player player   = Bukkit.getPlayer(playerId);
-
-        if (player != null && player.isOnline()) {
-            Map<Integer, ItemStack> overflow = player.getInventory().addItem(items);
-            if (!overflow.isEmpty()) {
-                // Inventory full — route overflow to mailbox
-                Collection<ItemStack> overflowItems = overflow.values();
-                MailboxManager.getInstance().storeItems(playerId, overflowItems);
-                player.sendMessage("§e[BlockStreet] §fInventory full! " +
-                        overflow.size() + " item stack(s) stored in your mailbox.");
-            }
-        } else {
-            // Player offline — store all items in mailbox for next login
-            MailboxManager.getInstance().storeItems(playerId, List.of(items));
-            logger.fine(String.format(
-                    "[SettlementDispatcher] Player %s offline during %s; items stored in mailbox.",
-                    playerId, context));
         }
     }
 }
